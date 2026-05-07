@@ -1,0 +1,16 @@
+package com.pravin.kafka.entity;
+
+public enum OrderStatus {
+
+    CREATED,
+    PAYMENT_PENDING,
+    PAYMENT_SUCCESS,
+    PAYMENT_FAILED,
+    PAYMENT_REFUND_INITIATED,
+    PAYMENT_REFUNDED,
+    INVENTORY_PENDING,
+    INVENTORY_RESERVED,
+    INVENTORY_FAILED,
+    COMPLETED,
+    CANCELLED
+}

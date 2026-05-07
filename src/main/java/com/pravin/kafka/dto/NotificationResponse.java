@@ -1,0 +1,12 @@
+package com.pravin.kafka.dto;
+
+import java.time.LocalDateTime;
+
+public record NotificationResponse(
+        Long id,
+        String type,
+        String recipient,
+        String status,
+        String message,
+        LocalDateTime sentAt
+) {}
