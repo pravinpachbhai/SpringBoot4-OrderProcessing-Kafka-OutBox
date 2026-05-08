@@ -21,7 +21,7 @@ public class OutboxEvent {
     private UUID id;
 
     private String aggregateType;
-    private String aggregateId;
+    private Long aggregateId;
     private String eventType;
 
     @Lob

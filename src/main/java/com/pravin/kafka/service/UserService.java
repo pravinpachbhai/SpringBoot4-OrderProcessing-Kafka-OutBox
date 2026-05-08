@@ -7,6 +7,7 @@ import com.pravin.kafka.exception.ResourceNotFoundException;
 import com.pravin.kafka.component.DataMapper;
 import com.pravin.kafka.repository.UserRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -20,6 +21,7 @@ public class UserService {
         this.dataMapper = dataMapper;
     }
 
+    @Transactional(transactionManager = "transactionManager")
     public UserResponse create(UserRequest request) {
         User user = dataMapper.toEntity(request);
         return dataMapper.toResponse(userRepository.save(user));

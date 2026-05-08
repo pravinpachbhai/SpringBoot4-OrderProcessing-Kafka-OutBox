@@ -9,6 +9,7 @@ import com.pravin.kafka.entity.Order;
 import com.pravin.kafka.entity.OrderStatus;
 import com.pravin.kafka.entity.OutboxEvent;
 import com.pravin.kafka.entity.Product;
+import com.pravin.kafka.event.OrderCreatedEvent;
 import com.pravin.kafka.exception.ResourceNotFoundException;
 import com.pravin.kafka.repository.OrderRepository;
 import com.pravin.kafka.repository.OutboxRepository;
@@ -44,7 +45,7 @@ public class OrderService {
         this.objectMapper = objectMapper;
     }
 
-    @Transactional
+    @Transactional(transactionManager = "transactionManager")
     public OrderResponse create(OrderRequest orderRequest)  {
 
         BigDecimal totalAmount = orderRequest.items().stream()
@@ -63,16 +64,19 @@ public class OrderService {
         Order saved = orderRepository.save(order);
         log.info("Order created.");
 
+        OrderCreatedEvent orderCreatedEvent = new OrderCreatedEvent(saved.getId());
+
         // publish event
         OutboxEvent event = new OutboxEvent();
         event.setId(UUID.randomUUID());
         event.setAggregateType("Order");
-        event.setAggregateId(String.valueOf(saved.getId()));
+        event.setAggregateId(saved.getId());
         event.setEventType("order.created");
         try {
-            event.setPayload(objectMapper.writeValueAsString(order));
+            event.setPayload(objectMapper.writeValueAsString(orderCreatedEvent));
         }catch (Exception e){
-            log.error("Error while setting the payload in order create. ");
+            log.error("Error while setting the payload in order create.", e);
+            throw new RuntimeException(e);
         }
         event.setStatus(OutboxEvent.Status.NEW);
         event.setCreatedAt(LocalDateTime.now());

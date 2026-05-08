@@ -1,7 +1,7 @@
 CREATE TABLE outbox_events (
                                id UUID PRIMARY KEY,
                                aggregate_type VARCHAR(100),
-                               aggregate_id VARCHAR(255),
+                               aggregate_id BIGINT,
                                event_type VARCHAR(100),
                                payload TEXT,
                                status VARCHAR(20), -- NEW, PUBLISHED, FAILED

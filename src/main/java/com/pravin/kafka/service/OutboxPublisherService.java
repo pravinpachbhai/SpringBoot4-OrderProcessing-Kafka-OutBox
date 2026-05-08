@@ -45,7 +45,7 @@ public class OutboxPublisherService {
                             event.getAggregateId(),
                             event.getAggregateType(), LocalDateTime.now(), event.getPayload());
                     try {
-                        ops.send(event.getEventType(), event.getAggregateId(), objectMapper.writeValueAsString(envelope));
+                        ops.send(event.getEventType(), String.valueOf(event.getAggregateId()), objectMapper.writeValueAsString(envelope));
                     } catch (Exception e) {
                         success = false;
                         event.setStatus(OutboxEvent.Status.FAILED);

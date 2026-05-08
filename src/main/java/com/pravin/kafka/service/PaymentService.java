@@ -10,6 +10,7 @@ import com.pravin.kafka.entity.Payment;
 import com.pravin.kafka.entity.PaymentStatus;
 import com.pravin.kafka.entity.ProcessedEvent;
 import com.pravin.kafka.event.InventoryReservedEvent;
+import com.pravin.kafka.event.PaymentSuccessEvent;
 import com.pravin.kafka.repository.OutboxRepository;
 import com.pravin.kafka.repository.PaymentRepository;
 import com.pravin.kafka.repository.ProcessedEventRepository;
@@ -46,13 +47,20 @@ public class PaymentService {
     }
 
     @KafkaListener(topics = "inventory.reserved", groupId = "payment-group")
-    @Transactional
+    @Transactional(transactionManager = "transactionManager")
     public void process(String message,
-                        @Header(org.springframework.kafka.support.KafkaHeaders.RECEIVED_KEY) String key) throws JsonProcessingException {
+                        @Header(org.springframework.kafka.support.KafkaHeaders.RECEIVED_KEY) String key)  {
         log.info("inventory.reserved event received in payment service to process payment.{}", key);
 
-        EventEnvelope eventEnvelope = objectMapper.readValue(message, EventEnvelope.class);
-        InventoryReservedEvent event = objectMapper.readValue(eventEnvelope.payload(), InventoryReservedEvent.class);
+        EventEnvelope eventEnvelope = null;
+        InventoryReservedEvent event = null;
+        try {
+            eventEnvelope = objectMapper.readValue(message, EventEnvelope.class);
+            event = objectMapper.readValue(eventEnvelope.payload(), InventoryReservedEvent.class);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+
         log.info("Event detail.{}", event);
 
         if (processedEventRepository.existsById(eventEnvelope.eventId())) {
@@ -62,13 +70,20 @@ public class PaymentService {
 
         //TODO Call process method
 
+        PaymentSuccessEvent paymentSuccessEvent = new PaymentSuccessEvent(event.id());
+
         // simulate payment success
         OutboxEvent outbox = new OutboxEvent();
         outbox.setId(UUID.randomUUID());
         outbox.setAggregateType("Order");
-        outbox.setAggregateId(String.valueOf(event.orderId()));
+        outbox.setAggregateId(event.id());
         outbox.setEventType("payment.completed");
-        outbox.setPayload(message);
+        try {
+            outbox.setPayload(objectMapper.writeValueAsString(paymentSuccessEvent));
+        }catch (Exception e){
+            log.error("Error while setting the payload in payment create.", e);
+            throw new RuntimeException(e);
+        }
         outbox.setStatus(OutboxEvent.Status.NEW);
         outbox.setCreatedAt(LocalDateTime.now());
         outboxRepository.save(outbox);
