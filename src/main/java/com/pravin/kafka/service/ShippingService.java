@@ -1,6 +1,7 @@
 package com.pravin.kafka.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pravin.kafka.component.DataMapper;
 import com.pravin.kafka.dto.EventEnvelope;
 import com.pravin.kafka.dto.ShipmentRequest;
@@ -9,7 +10,6 @@ import com.pravin.kafka.entity.OutboxEvent;
 import com.pravin.kafka.entity.ProcessedEvent;
 import com.pravin.kafka.entity.Shipment;
 import com.pravin.kafka.entity.ShipmentStatus;
-import com.pravin.kafka.event.InventoryReservedEvent;
 import com.pravin.kafka.event.PaymentSuccessEvent;
 import com.pravin.kafka.event.ShipmentCreatedEvent;
 import com.pravin.kafka.repository.OutboxRepository;
@@ -17,13 +17,12 @@ import com.pravin.kafka.repository.ProcessedEventRepository;
 import com.pravin.kafka.repository.ShipmentRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.annotation.DependsOn;
+import org.slf4j.MDC;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
@@ -55,44 +54,66 @@ public class ShippingService {
     public void ship(String message,
                      @Header(org.springframework.kafka.support.KafkaHeaders.RECEIVED_KEY) String key)  {
         log.info("payment.completed event received in shipping service for shipment.{}", key);
-
-        EventEnvelope eventEnvelope = null;
+        EventEnvelope<PaymentSuccessEvent> eventEnvelope = null;
         PaymentSuccessEvent event = null;
         try {
-            eventEnvelope = objectMapper.readValue(message, EventEnvelope.class);
-            event = objectMapper.readValue(eventEnvelope.payload(), PaymentSuccessEvent.class);
-        } catch (JsonProcessingException e) {
+            eventEnvelope = objectMapper.readValue(message, new TypeReference<>() {
+            });
+            event = eventEnvelope.payload();
+            MDC.put("X-Correlation-Id", eventEnvelope.correlationId());
+            UUID eventId = eventEnvelope.eventId();
+            log.info("Event detail.{}", event);
+
+            if (processedEventRepository.existsById(eventId)) {
+                log.info("payment.completed event received but it was already processed");
+                return; // already processed
+            }
+
+            ShipmentCreatedEvent shipmentCreatedEvent = new ShipmentCreatedEvent(event.id());
+            //TODO Call create method
+
+            // simulate shipping success
+
+            UUID shippingEventId = UUID.randomUUID();
+            OutboxEvent outbox = new OutboxEvent();
+            outbox.setId(shippingEventId);
+            outbox.setAggregateType("Order");
+            outbox.setAggregateId(event.id());
+            outbox.setEventType("shipment.created");
+            outbox.setCorrelationId(eventEnvelope.correlationId());
+            EventEnvelope<ShipmentCreatedEvent> envelope =
+                    new EventEnvelope<>(
+                            shippingEventId,
+                            eventEnvelope.correlationId(),
+                            outbox.getEventType(),
+                            outbox.getAggregateId(),
+                            outbox.getAggregateType(),
+                            LocalDateTime.now(),
+                            shipmentCreatedEvent
+                    );
+
+            try {
+                outbox.setPayload(objectMapper.writeValueAsString(envelope));
+            } catch (Exception e) {
+                log.error("Error while setting the payload in payment create.", e);
+                throw new RuntimeException(e);
+            }
+            outbox.setStatus(OutboxEvent.Status.NEW);
+            outbox.setCreatedAt(LocalDateTime.now());
+            outboxRepository.save(outbox);
+            log.info("Event publish for shipment.created.");
+            try {
+                processedEventRepository.save(
+                        new ProcessedEvent(eventId, LocalDateTime.now())
+                );
+            } catch (DataIntegrityViolationException e) {
+                log.info("Duplicate event ignored {}", eventId);
+            }
+        } catch (Exception e) {
             throw new RuntimeException(e);
+        } finally {
+            MDC.clear();
         }
-
-        log.info("Event detail.{}", event);
-
-        if (processedEventRepository.existsById(eventEnvelope.eventId())) {
-            log.info("payment.completed event received but it was already processed");
-            return; // already processed
-        }
-
-        ShipmentCreatedEvent shipmentCreatedEvent = new ShipmentCreatedEvent(event.id());
-        //TODO Call create method
-
-        // simulate shipping success
-        OutboxEvent outbox = new OutboxEvent();
-        outbox.setId(UUID.randomUUID());
-        outbox.setAggregateType("Order");
-        outbox.setAggregateId(event.id());
-        outbox.setEventType("shipment.created");
-        try {
-            outbox.setPayload(objectMapper.writeValueAsString(shipmentCreatedEvent));
-        }catch (Exception e){
-            log.error("Error while setting the payload in payment create.", e);
-            throw new RuntimeException(e);
-        }
-        outbox.setStatus(OutboxEvent.Status.NEW);
-        outbox.setCreatedAt(LocalDateTime.now());
-        outboxRepository.save(outbox);
-        log.info("Event publish for shipment.created.");
-        processedEventRepository.save(new ProcessedEvent(eventEnvelope.eventId(), LocalDateTime.now()));
-
     }
 
     public ShipmentResponse create(ShipmentRequest shipmentRequest) {

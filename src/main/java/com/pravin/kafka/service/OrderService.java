@@ -3,6 +3,7 @@ package com.pravin.kafka.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pravin.kafka.component.DataMapper;
+import com.pravin.kafka.dto.EventEnvelope;
 import com.pravin.kafka.dto.OrderRequest;
 import com.pravin.kafka.dto.OrderResponse;
 import com.pravin.kafka.entity.Order;
@@ -10,6 +11,7 @@ import com.pravin.kafka.entity.OrderStatus;
 import com.pravin.kafka.entity.OutboxEvent;
 import com.pravin.kafka.entity.Product;
 import com.pravin.kafka.event.OrderCreatedEvent;
+import com.pravin.kafka.event.OrderItemEvent;
 import com.pravin.kafka.exception.ResourceNotFoundException;
 import com.pravin.kafka.repository.OrderRepository;
 import com.pravin.kafka.repository.OutboxRepository;
@@ -32,6 +34,7 @@ public class OrderService {
     private final DataMapper dataMapper;
     private final ProductRepository productRepository;
     private final ObjectMapper objectMapper;
+    private UUID eventId;
 
     public OrderService(OrderRepository orderRepository,
                         ProductRepository productRepository,
@@ -46,8 +49,9 @@ public class OrderService {
     }
 
     @Transactional(transactionManager = "transactionManager")
-    public OrderResponse create(OrderRequest orderRequest)  {
-
+    public OrderResponse create(OrderRequest orderRequest, String correlationId) {
+        // Currently, price is fetched from the product table, not from the UI.
+        // In the future, discount logic may require taking the price from the UI.
         BigDecimal totalAmount = orderRequest.items().stream()
                 .map(item -> {
                     Product product = productRepository.findById(item.productId())
@@ -61,27 +65,53 @@ public class OrderService {
         Order order = dataMapper.toEntity(orderRequest);
         order.setStatus(OrderStatus.CREATED);
         order.setTotalAmount(totalAmount);
+        order.getItems().forEach(item -> item.setOrder(order));
         Order saved = orderRepository.save(order);
         log.info("Order created.");
 
-        OrderCreatedEvent orderCreatedEvent = new OrderCreatedEvent(saved.getId());
+        OrderCreatedEvent orderCreatedEvent = new OrderCreatedEvent(
+                saved.getId(),
+                saved.getItems().stream()
+                        .map(i -> new OrderItemEvent(i.getProductId(), i.getQuantity()))
+                        .toList()
+        );
 
+
+        UUID eventId = UUID.randomUUID();
         // publish event
         OutboxEvent event = new OutboxEvent();
-        event.setId(UUID.randomUUID());
+        event.setId(eventId);
         event.setAggregateType("Order");
         event.setAggregateId(saved.getId());
+        event.setCorrelationId(correlationId);
         event.setEventType("order.created");
+
+        EventEnvelope<OrderCreatedEvent> envelope =
+                new EventEnvelope<>(
+                        eventId,
+                        correlationId,
+                        event.getEventType(),
+                        event.getAggregateId(),
+                        event.getAggregateType(),
+                        LocalDateTime.now(),
+                        orderCreatedEvent
+                );
+
         try {
-            event.setPayload(objectMapper.writeValueAsString(orderCreatedEvent));
-        }catch (Exception e){
-            log.error("Error while setting the payload in order create.", e);
-            throw new RuntimeException(e);
+            event.setPayload(objectMapper.writeValueAsString(envelope));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize order event", e);
         }
         event.setStatus(OutboxEvent.Status.NEW);
         event.setCreatedAt(LocalDateTime.now());
         outboxRepository.save(event);
         log.info("Event publish order-created.");
+        log.info(
+                "Created outbox event {} for order {}",
+                event.getId(),
+                saved.getId()
+        );
+
         return dataMapper.toResponse(saved);
     }
 

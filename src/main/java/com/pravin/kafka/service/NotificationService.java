@@ -1,6 +1,6 @@
 package com.pravin.kafka.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pravin.kafka.component.DataMapper;
 import com.pravin.kafka.dto.EventEnvelope;
@@ -14,12 +14,15 @@ import com.pravin.kafka.repository.OutboxRepository;
 import com.pravin.kafka.repository.ProcessedEventRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
 
 @Service
 public class NotificationService {
@@ -49,22 +52,36 @@ public class NotificationService {
                        @Header(org.springframework.kafka.support.KafkaHeaders.RECEIVED_KEY) String key) {
         log.info("shipment.created event received in notification service to inform customer for Order Id.{}", key);
 
-        EventEnvelope eventEnvelope = null;
+        EventEnvelope<ShipmentCreatedEvent> eventEnvelope = null;
         ShipmentCreatedEvent event = null;
         try {
-            eventEnvelope = objectMapper.readValue(message, EventEnvelope.class);
-            event = objectMapper.readValue(eventEnvelope.payload(), ShipmentCreatedEvent.class);
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException(e);
-        }
+            eventEnvelope = objectMapper.readValue(message, new TypeReference<>() {
+            });
+            event = eventEnvelope.payload();
+            MDC.put("X-Correlation-Id", eventEnvelope.correlationId());
 
-        log.info("Event detail.{}", event);
-        if (processedEventRepository.existsById(eventEnvelope.eventId())) {
+            UUID eventId = eventEnvelope.eventId();
+
+            log.info("Event detail.{}", event);
+            if (processedEventRepository.existsById(eventId)) {
             log.info("shipment.created event received but it was already processed");
             return; // already processed
         }
-        processedEventRepository.save(new ProcessedEvent(eventEnvelope.eventId(), LocalDateTime.now()));
+            try {
+                processedEventRepository.save(
+                        new ProcessedEvent(eventId, LocalDateTime.now())
+                );
+            } catch (DataIntegrityViolationException e) {
+                log.info("Duplicate event ignored {}", eventId);
+                return;
+            }
         log.info("Email sent for order: " + event.id());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            MDC.clear();
+        }
+
     }
 
     public NotificationResponse send(NotificationRequest notificationRequest) {

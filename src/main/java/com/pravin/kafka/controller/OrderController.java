@@ -9,6 +9,7 @@ import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/orders")
@@ -23,7 +24,9 @@ public class OrderController {
 
     @PostMapping
     public OrderResponse create(@Valid @RequestBody OrderRequest order) {
-        return service.create(order);
+        // This must come from UI
+        String correlationId = UUID.randomUUID().toString();
+        return service.create(order, correlationId);
     }
 
     @GetMapping("/{id}")

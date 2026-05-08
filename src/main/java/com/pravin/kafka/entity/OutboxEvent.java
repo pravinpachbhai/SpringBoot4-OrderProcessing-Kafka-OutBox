@@ -30,11 +30,19 @@ public class OutboxEvent {
     @Enumerated(EnumType.STRING)
     private Status status;
 
+    private String correlationId;
+    private Integer retryCount;
+    private LocalDateTime nextRetryAt;
+    private String errorMessage;
     private LocalDateTime createdAt = null;
     private LocalDateTime updatedAt = null;
     private LocalDateTime processedAt = null;
 
     public enum Status {
-        NEW, PUBLISHED, PENDING, PROCESSED, FAILED
+        NEW,
+        PROCESSING,
+        PUBLISHED,
+        RETRY,
+        DEAD
     }
 }

@@ -29,6 +29,7 @@ public class KafkaConfig {
         return template;
     }
 
+    /*
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory(
             ConsumerFactory<String, String> cf,
@@ -39,6 +40,6 @@ public class KafkaConfig {
         factory.getContainerProperties().setKafkaAwareTransactionManager(ktm);
         return factory;
     }
-
+   */
 
 }

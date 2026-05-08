@@ -1,11 +1,10 @@
 package com.pravin.kafka.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pravin.kafka.component.DataMapper;
 import com.pravin.kafka.dto.EventEnvelope;
 import com.pravin.kafka.dto.InventoryResponse;
-import com.pravin.kafka.dto.OrderResponse;
 import com.pravin.kafka.entity.Inventory;
 import com.pravin.kafka.entity.OutboxEvent;
 import com.pravin.kafka.entity.ProcessedEvent;
@@ -18,6 +17,8 @@ import com.pravin.kafka.repository.OutboxRepository;
 import com.pravin.kafka.repository.ProcessedEventRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Service;
@@ -34,59 +35,79 @@ public class InventoryService {
     private final OutboxRepository outboxRepository;
     private final ObjectMapper objectMapper;
     private final ProcessedEventRepository processedEventRepository;
-    private final OrderService orderService;
 
     public InventoryService(InventoryRepository repo,
                             DataMapper dataMapper,
                             OutboxRepository outboxRepository,
                             ObjectMapper objectMapper,
-                            ProcessedEventRepository processedEventRepository,
-                            OrderService orderService) {
+                            ProcessedEventRepository processedEventRepository) {
         this.repo = repo;
         this.dataMapper = dataMapper;
         this.outboxRepository = outboxRepository;
         this.objectMapper = objectMapper;
         this.processedEventRepository = processedEventRepository;
-        this.orderService = orderService;
     }
 
     @KafkaListener(topics = "order.created", groupId = "inventory-group")
     @Transactional(transactionManager = "transactionManager")
     public void handle(String message,
-                       @Header(org.springframework.kafka.support.KafkaHeaders.RECEIVED_KEY) String key) {
-            log.info("order.created event received in inventory service to reserve the qty.{}", key);
+                       @Header(org.springframework.kafka.support.KafkaHeaders.RECEIVED_KEY) String key
+    ) {
 
-        EventEnvelope eventEnvelope = null;
-        try {
-            eventEnvelope = objectMapper.readValue(message, EventEnvelope.class);
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException(e);
-        }
+
+        log.info("order.created event received in inventory service to reserve the qty.{}", key);
+        EventEnvelope<OrderCreatedEvent> eventEnvelope = null;
         OrderCreatedEvent event = null;
+
         try {
-            event = objectMapper.readValue(eventEnvelope.payload(), OrderCreatedEvent.class);
-        } catch (JsonProcessingException e) {
+            eventEnvelope = objectMapper.readValue(
+                    message,
+                    new TypeReference<EventEnvelope<OrderCreatedEvent>>() {
+                    }
+            );
+            event = eventEnvelope.payload();
+            MDC.put("X-Correlation-Id", eventEnvelope.correlationId());
+        } catch (Exception e) {
+            log.error("Invalid event format", e);
             throw new RuntimeException(e);
         }
-        log.info("Event detail.{}", event);
 
-            if (processedEventRepository.existsById(eventEnvelope.eventId())) {
+
+        try {
+            UUID eventId = eventEnvelope.eventId();
+            log.info("Event detail.{}", event);
+
+            if (processedEventRepository.existsById(eventId)) {
                 log.info("order.created event received but it was already processed");
-                 return;
+                return;
             }
+            event.items().forEach(item ->
+                    reserve(item.productId(), item.quantity())
+            );
 
-        OrderResponse orderResponse = orderService.get(event.id());
-        orderResponse.items().forEach(item -> reserve(item.productId(), item.quantity()));
+            InventoryReservedEvent inventoryReservedEvent = new InventoryReservedEvent(event.id());
 
-        InventoryReservedEvent inventoryReservedEvent = new InventoryReservedEvent(event.id());
-
+            UUID inventoryEventId = UUID.randomUUID();
             OutboxEvent outbox = new OutboxEvent();
-            outbox.setId(UUID.randomUUID());
+            outbox.setId(inventoryEventId);
             outbox.setAggregateType("Order");
             outbox.setAggregateId(event.id());
             outbox.setEventType("inventory.reserved");
+            outbox.setCorrelationId(eventEnvelope.correlationId());
+
+            EventEnvelope<InventoryReservedEvent> envelope =
+                    new EventEnvelope<>(
+                            inventoryEventId,
+                            eventEnvelope.correlationId(),
+                            outbox.getEventType(),
+                            outbox.getAggregateId(),
+                            outbox.getAggregateType(),
+                            LocalDateTime.now(),
+                            inventoryReservedEvent
+                    );
+
             try {
-                outbox.setPayload(objectMapper.writeValueAsString(inventoryReservedEvent));
+                outbox.setPayload(objectMapper.writeValueAsString(envelope));
             }catch (Exception e){
                  log.error("Error while setting the payload in inventory.", e);
                  throw new RuntimeException(e);
@@ -95,7 +116,19 @@ public class InventoryService {
             outbox.setCreatedAt(LocalDateTime.now());
             outboxRepository.save(outbox);
             log.info("Event publish for inventory.reserved.");
-            processedEventRepository.save(new ProcessedEvent(eventEnvelope.eventId(), LocalDateTime.now()));
+
+            try {
+                processedEventRepository.save(
+                        new ProcessedEvent(eventId, LocalDateTime.now())
+                );
+            } catch (DataIntegrityViolationException e) {
+                log.info("Duplicate event ignored {}", eventEnvelope.eventId());
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            MDC.clear();
+        }
 
     }
 

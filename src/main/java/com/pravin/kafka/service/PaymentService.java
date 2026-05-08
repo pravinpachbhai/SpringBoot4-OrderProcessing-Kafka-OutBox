@@ -1,6 +1,7 @@
 package com.pravin.kafka.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pravin.kafka.component.DataMapper;
 import com.pravin.kafka.dto.EventEnvelope;
 import com.pravin.kafka.dto.PaymentRequest;
@@ -16,11 +17,12 @@ import com.pravin.kafka.repository.PaymentRepository;
 import com.pravin.kafka.repository.ProcessedEventRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
@@ -51,19 +53,18 @@ public class PaymentService {
     public void process(String message,
                         @Header(org.springframework.kafka.support.KafkaHeaders.RECEIVED_KEY) String key)  {
         log.info("inventory.reserved event received in payment service to process payment.{}", key);
-
-        EventEnvelope eventEnvelope = null;
+        EventEnvelope<InventoryReservedEvent> eventEnvelope = null;
         InventoryReservedEvent event = null;
         try {
-            eventEnvelope = objectMapper.readValue(message, EventEnvelope.class);
-            event = objectMapper.readValue(eventEnvelope.payload(), InventoryReservedEvent.class);
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException(e);
-        }
+            eventEnvelope = objectMapper.readValue(message, new TypeReference<>() {
+            });
+            event = eventEnvelope.payload();
+            MDC.put("X-Correlation-Id", eventEnvelope.correlationId());
+            UUID eventId = eventEnvelope.eventId();
 
-        log.info("Event detail.{}", event);
+            log.info("Event detail.{}", event);
 
-        if (processedEventRepository.existsById(eventEnvelope.eventId())) {
+            if (processedEventRepository.existsById(eventId)) {
             log.info("inventory.reserved event received but it was already processed");
             return; // already processed
         }
@@ -73,13 +74,25 @@ public class PaymentService {
         PaymentSuccessEvent paymentSuccessEvent = new PaymentSuccessEvent(event.id());
 
         // simulate payment success
+            UUID paymentEventId = UUID.randomUUID();
         OutboxEvent outbox = new OutboxEvent();
-        outbox.setId(UUID.randomUUID());
+            outbox.setId(paymentEventId);
         outbox.setAggregateType("Order");
         outbox.setAggregateId(event.id());
         outbox.setEventType("payment.completed");
+            outbox.setCorrelationId(eventEnvelope.correlationId());
+            EventEnvelope<PaymentSuccessEvent> envelope =
+                    new EventEnvelope<>(
+                            paymentEventId,
+                            eventEnvelope.correlationId(),
+                            outbox.getEventType(),
+                            outbox.getAggregateId(),
+                            outbox.getAggregateType(),
+                            LocalDateTime.now(),
+                            paymentSuccessEvent
+                    );
         try {
-            outbox.setPayload(objectMapper.writeValueAsString(paymentSuccessEvent));
+            outbox.setPayload(objectMapper.writeValueAsString(envelope));
         }catch (Exception e){
             log.error("Error while setting the payload in payment create.", e);
             throw new RuntimeException(e);
@@ -88,7 +101,18 @@ public class PaymentService {
         outbox.setCreatedAt(LocalDateTime.now());
         outboxRepository.save(outbox);
         log.info("Event publish for payment.completed.");
-        processedEventRepository.save(new ProcessedEvent(eventEnvelope.eventId(), LocalDateTime.now()));
+            try {
+                processedEventRepository.save(
+                        new ProcessedEvent(eventId, LocalDateTime.now())
+                );
+            } catch (DataIntegrityViolationException e) {
+                log.info("Duplicate event ignored {}", eventId);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            MDC.clear();
+        }
     }
 
     public PaymentResponse process(PaymentRequest paymentRequest) {

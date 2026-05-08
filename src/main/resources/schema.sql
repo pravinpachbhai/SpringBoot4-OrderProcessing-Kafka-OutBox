@@ -4,10 +4,14 @@ CREATE TABLE outbox_events (
                                aggregate_id BIGINT,
                                event_type VARCHAR(100),
                                payload TEXT,
-                               status VARCHAR(20), -- NEW, PUBLISHED, FAILED
+                               status VARCHAR(20),
                                created_at TIMESTAMP,
                                updated_at TIMESTAMP,
-                               processed_at TIMESTAMP
+                               processed_at TIMESTAMP,
+                               retry_count INT DEFAULT 0,
+                               next_retry_at TIMESTAMP,
+                               correlation_id VARCHAR(250),
+                               error_message TEXT
 );
 
 CREATE TABLE processed_events (
