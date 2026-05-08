@@ -16,6 +16,7 @@ import com.pravin.kafka.exception.ResourceNotFoundException;
 import com.pravin.kafka.repository.OrderRepository;
 import com.pravin.kafka.repository.OutboxRepository;
 import com.pravin.kafka.repository.ProductRepository;
+import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -52,31 +53,18 @@ public class OrderService {
     public OrderResponse create(OrderRequest orderRequest, String correlationId) {
         // Currently, price is fetched from the product table, not from the UI.
         // In the future, discount logic may require taking the price from the UI.
-        BigDecimal totalAmount = orderRequest.items().stream()
-                .map(item -> {
-                    Product product = productRepository.findById(item.productId())
-                            .orElseThrow(() -> new RuntimeException("Product not found"));
-
-                    return product.getPrice()
-                            .multiply(BigDecimal.valueOf(item.quantity()));
-                })
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-        Order order = dataMapper.toEntity(orderRequest);
-        order.setStatus(OrderStatus.CREATED);
-        order.setTotalAmount(totalAmount);
-        order.getItems().forEach(item -> item.setOrder(order));
-        Order saved = orderRepository.save(order);
-        log.info("Order created.");
-
+        Order saved = saveAndGetOrder(orderRequest);
         OrderCreatedEvent orderCreatedEvent = new OrderCreatedEvent(
                 saved.getId(),
                 saved.getItems().stream()
                         .map(i -> new OrderItemEvent(i.getProductId(), i.getQuantity()))
                         .toList()
         );
+        createOutboxEvent(correlationId, saved, orderCreatedEvent);
+        return dataMapper.toResponse(saved);
+    }
 
-
+    private void createOutboxEvent(String correlationId, Order saved, OrderCreatedEvent orderCreatedEvent) {
         UUID eventId = UUID.randomUUID();
         // publish event
         OutboxEvent event = new OutboxEvent();
@@ -105,14 +93,31 @@ public class OrderService {
         event.setStatus(OutboxEvent.Status.NEW);
         event.setCreatedAt(LocalDateTime.now());
         outboxRepository.save(event);
-        log.info("Event publish order-created.");
         log.info(
                 "Created outbox event {} for order {}",
                 event.getId(),
                 saved.getId()
         );
+    }
 
-        return dataMapper.toResponse(saved);
+    private @NonNull Order saveAndGetOrder(OrderRequest orderRequest) {
+        BigDecimal totalAmount = orderRequest.items().stream()
+                .map(item -> {
+                    Product product = productRepository.findById(item.productId())
+                            .orElseThrow(() -> new RuntimeException("Product not found"));
+
+                    return product.getPrice()
+                            .multiply(BigDecimal.valueOf(item.quantity()));
+                })
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        Order order = dataMapper.toEntity(orderRequest);
+        order.setStatus(OrderStatus.CREATED);
+        order.setTotalAmount(totalAmount);
+        order.getItems().forEach(item -> item.setOrder(order));
+        Order saved = orderRepository.save(order);
+        log.info("Order created.");
+        return saved;
     }
 
     public OrderResponse get(Long id) {

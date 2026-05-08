@@ -6,12 +6,10 @@ import com.pravin.kafka.component.DataMapper;
 import com.pravin.kafka.dto.EventEnvelope;
 import com.pravin.kafka.dto.PaymentRequest;
 import com.pravin.kafka.dto.PaymentResponse;
-import com.pravin.kafka.entity.OutboxEvent;
-import com.pravin.kafka.entity.Payment;
-import com.pravin.kafka.entity.PaymentStatus;
-import com.pravin.kafka.entity.ProcessedEvent;
+import com.pravin.kafka.entity.*;
 import com.pravin.kafka.event.InventoryReservedEvent;
 import com.pravin.kafka.event.PaymentSuccessEvent;
+import com.pravin.kafka.repository.OrderRepository;
 import com.pravin.kafka.repository.OutboxRepository;
 import com.pravin.kafka.repository.PaymentRepository;
 import com.pravin.kafka.repository.ProcessedEventRepository;
@@ -30,28 +28,31 @@ import java.util.UUID;
 @Service
 public class PaymentService {
     private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
-    private final PaymentRepository repo;
+    private final PaymentRepository paymentRepository;
     private final DataMapper dataMapper;
     private final OutboxRepository outboxRepository;
     private final ObjectMapper objectMapper;
+    private final OrderRepository orderRepository;
     private final ProcessedEventRepository processedEventRepository;
 
-    public PaymentService(PaymentRepository repo,
+    public PaymentService(PaymentRepository paymentRepository,
                           DataMapper dataMapper,
                           OutboxRepository outboxRepository,
                           ObjectMapper objectMapper,
-                          ProcessedEventRepository processedEventRepository) {
-        this.repo = repo;
+                          ProcessedEventRepository processedEventRepository,
+                          OrderRepository orderRepository) {
+        this.paymentRepository = paymentRepository;
         this.dataMapper = dataMapper;
         this.outboxRepository = outboxRepository;
         this.objectMapper = objectMapper;
         this.processedEventRepository = processedEventRepository;
+        this.orderRepository = orderRepository;
     }
 
     @KafkaListener(topics = "inventory.reserved", groupId = "payment-group")
     @Transactional(transactionManager = "transactionManager")
     public void process(String message,
-                        @Header(org.springframework.kafka.support.KafkaHeaders.RECEIVED_KEY) String key)  {
+                        @Header(org.springframework.kafka.support.KafkaHeaders.RECEIVED_KEY) String key) {
         log.info("inventory.reserved event received in payment service to process payment.{}", key);
         EventEnvelope<InventoryReservedEvent> eventEnvelope = null;
         InventoryReservedEvent event = null;
@@ -65,42 +66,28 @@ public class PaymentService {
             log.info("Event detail.{}", event);
 
             if (processedEventRepository.existsById(eventId)) {
-            log.info("inventory.reserved event received but it was already processed");
-            return; // already processed
-        }
+                log.info("inventory.reserved event received but it was already processed");
+                return; // already processed
+            }
+            Order order = orderRepository.findById(event.id())
+                    .orElseThrow(() -> new RuntimeException("Order not found"));
 
-        //TODO Call process method
+            Payment payment = paymentRepository.findByOrderId(order.getId())
+                    .orElseGet(() -> {
+                        Payment p = new Payment();
+                        p.setOrderId(order.getId());
+                        return p;
+                    });
 
-        PaymentSuccessEvent paymentSuccessEvent = new PaymentSuccessEvent(event.id());
+            if (payment.getStatus() == PaymentStatus.SUCCESS) {
+                log.info("Payment already processed for order {}", order.getId());
+                return;
+            }
+            payment.setAmount(order.getTotalAmount());
+            payment.setStatus(PaymentStatus.PENDING);
+            paymentRepository.save(payment);
 
-        // simulate payment success
-            UUID paymentEventId = UUID.randomUUID();
-        OutboxEvent outbox = new OutboxEvent();
-            outbox.setId(paymentEventId);
-        outbox.setAggregateType("Order");
-        outbox.setAggregateId(event.id());
-        outbox.setEventType("payment.completed");
-            outbox.setCorrelationId(eventEnvelope.correlationId());
-            EventEnvelope<PaymentSuccessEvent> envelope =
-                    new EventEnvelope<>(
-                            paymentEventId,
-                            eventEnvelope.correlationId(),
-                            outbox.getEventType(),
-                            outbox.getAggregateId(),
-                            outbox.getAggregateType(),
-                            LocalDateTime.now(),
-                            paymentSuccessEvent
-                    );
-        try {
-            outbox.setPayload(objectMapper.writeValueAsString(envelope));
-        }catch (Exception e){
-            log.error("Error while setting the payload in payment create.", e);
-            throw new RuntimeException(e);
-        }
-        outbox.setStatus(OutboxEvent.Status.NEW);
-        outbox.setCreatedAt(LocalDateTime.now());
-        outboxRepository.save(outbox);
-        log.info("Event publish for payment.completed.");
+            createOutboxEvent(event, eventEnvelope);
             try {
                 processedEventRepository.save(
                         new ProcessedEvent(eventId, LocalDateTime.now())
@@ -115,13 +102,44 @@ public class PaymentService {
         }
     }
 
+    private void createOutboxEvent(InventoryReservedEvent event, EventEnvelope<InventoryReservedEvent> eventEnvelope) {
+        PaymentSuccessEvent paymentSuccessEvent = new PaymentSuccessEvent(event.id());
+        UUID paymentEventId = UUID.randomUUID();
+        OutboxEvent outbox = new OutboxEvent();
+        outbox.setId(paymentEventId);
+        outbox.setAggregateType("Order");
+        outbox.setAggregateId(event.id());
+        outbox.setEventType("payment.completed");
+        outbox.setCorrelationId(eventEnvelope.correlationId());
+        EventEnvelope<PaymentSuccessEvent> envelope =
+                new EventEnvelope<>(
+                        paymentEventId,
+                        eventEnvelope.correlationId(),
+                        outbox.getEventType(),
+                        outbox.getAggregateId(),
+                        outbox.getAggregateType(),
+                        LocalDateTime.now(),
+                        paymentSuccessEvent
+                );
+        try {
+            outbox.setPayload(objectMapper.writeValueAsString(envelope));
+        } catch (Exception e) {
+            log.error("Error while setting the payload in payment create.", e);
+            throw new RuntimeException(e);
+        }
+        outbox.setStatus(OutboxEvent.Status.NEW);
+        outbox.setCreatedAt(LocalDateTime.now());
+        outboxRepository.save(outbox);
+        log.info("Event publish for payment.completed.");
+    }
+
     public PaymentResponse process(PaymentRequest paymentRequest) {
         Payment payment = dataMapper.toEntity(paymentRequest);
         payment.setStatus(PaymentStatus.SUCCESS);
-        return dataMapper.toResponse(repo.save(payment));
+        return dataMapper.toResponse(paymentRepository.save(payment));
     }
 
     public void refundPayment(Long id) {
-            //TODO
+        //TODO
     }
 }

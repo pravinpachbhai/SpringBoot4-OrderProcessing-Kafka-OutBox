@@ -54,7 +54,6 @@ public class InventoryService {
                        @Header(org.springframework.kafka.support.KafkaHeaders.RECEIVED_KEY) String key
     ) {
 
-
         log.info("order.created event received in inventory service to reserve the qty.{}", key);
         EventEnvelope<OrderCreatedEvent> eventEnvelope = null;
         OrderCreatedEvent event = null;
@@ -72,7 +71,6 @@ public class InventoryService {
             throw new RuntimeException(e);
         }
 
-
         try {
             UUID eventId = eventEnvelope.eventId();
             log.info("Event detail.{}", event);
@@ -85,42 +83,10 @@ public class InventoryService {
                     reserve(item.productId(), item.quantity())
             );
 
-            InventoryReservedEvent inventoryReservedEvent = new InventoryReservedEvent(event.id());
-
-            UUID inventoryEventId = UUID.randomUUID();
-            OutboxEvent outbox = new OutboxEvent();
-            outbox.setId(inventoryEventId);
-            outbox.setAggregateType("Order");
-            outbox.setAggregateId(event.id());
-            outbox.setEventType("inventory.reserved");
-            outbox.setCorrelationId(eventEnvelope.correlationId());
-
-            EventEnvelope<InventoryReservedEvent> envelope =
-                    new EventEnvelope<>(
-                            inventoryEventId,
-                            eventEnvelope.correlationId(),
-                            outbox.getEventType(),
-                            outbox.getAggregateId(),
-                            outbox.getAggregateType(),
-                            LocalDateTime.now(),
-                            inventoryReservedEvent
-                    );
+            createOutboxEvent(event, eventEnvelope);
 
             try {
-                outbox.setPayload(objectMapper.writeValueAsString(envelope));
-            }catch (Exception e){
-                 log.error("Error while setting the payload in inventory.", e);
-                 throw new RuntimeException(e);
-            }
-            outbox.setStatus(OutboxEvent.Status.NEW);
-            outbox.setCreatedAt(LocalDateTime.now());
-            outboxRepository.save(outbox);
-            log.info("Event publish for inventory.reserved.");
-
-            try {
-                processedEventRepository.save(
-                        new ProcessedEvent(eventId, LocalDateTime.now())
-                );
+                processedEventRepository.save(new ProcessedEvent(eventId, LocalDateTime.now()));
             } catch (DataIntegrityViolationException e) {
                 log.info("Duplicate event ignored {}", eventEnvelope.eventId());
             }
@@ -130,6 +96,39 @@ public class InventoryService {
             MDC.clear();
         }
 
+    }
+
+    private void createOutboxEvent(OrderCreatedEvent event, EventEnvelope<OrderCreatedEvent> eventEnvelope) {
+        InventoryReservedEvent inventoryReservedEvent = new InventoryReservedEvent(event.id());
+        UUID inventoryEventId = UUID.randomUUID();
+        OutboxEvent outbox = new OutboxEvent();
+        outbox.setId(inventoryEventId);
+        outbox.setAggregateType("Order");
+        outbox.setAggregateId(event.id());
+        outbox.setEventType("inventory.reserved");
+        outbox.setCorrelationId(eventEnvelope.correlationId());
+
+        EventEnvelope<InventoryReservedEvent> envelope =
+                new EventEnvelope<>(
+                        inventoryEventId,
+                        eventEnvelope.correlationId(),
+                        outbox.getEventType(),
+                        outbox.getAggregateId(),
+                        outbox.getAggregateType(),
+                        LocalDateTime.now(),
+                        inventoryReservedEvent
+                );
+
+        try {
+            outbox.setPayload(objectMapper.writeValueAsString(envelope));
+        }catch (Exception e){
+             log.error("Error while setting the payload in inventory.", e);
+             throw new RuntimeException(e);
+        }
+        outbox.setStatus(OutboxEvent.Status.NEW);
+        outbox.setCreatedAt(LocalDateTime.now());
+        outboxRepository.save(outbox);
+        log.info("Event publish for inventory.reserved.");
     }
 
     public InventoryResponse get(Long productId) {

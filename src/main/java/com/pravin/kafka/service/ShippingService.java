@@ -6,10 +6,7 @@ import com.pravin.kafka.component.DataMapper;
 import com.pravin.kafka.dto.EventEnvelope;
 import com.pravin.kafka.dto.ShipmentRequest;
 import com.pravin.kafka.dto.ShipmentResponse;
-import com.pravin.kafka.entity.OutboxEvent;
-import com.pravin.kafka.entity.ProcessedEvent;
-import com.pravin.kafka.entity.Shipment;
-import com.pravin.kafka.entity.ShipmentStatus;
+import com.pravin.kafka.entity.*;
 import com.pravin.kafka.event.PaymentSuccessEvent;
 import com.pravin.kafka.event.ShipmentCreatedEvent;
 import com.pravin.kafka.repository.OutboxRepository;
@@ -29,7 +26,7 @@ import java.util.UUID;
 
 @Service
 public class ShippingService {
-    private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
+    private static final Logger log = LoggerFactory.getLogger(ShippingService.class);
 
     private final ShipmentRepository repo;
     private final DataMapper dataMapper;
@@ -69,39 +66,8 @@ public class ShippingService {
                 return; // already processed
             }
 
-            ShipmentCreatedEvent shipmentCreatedEvent = new ShipmentCreatedEvent(event.id());
-            //TODO Call create method
-
-            // simulate shipping success
-
-            UUID shippingEventId = UUID.randomUUID();
-            OutboxEvent outbox = new OutboxEvent();
-            outbox.setId(shippingEventId);
-            outbox.setAggregateType("Order");
-            outbox.setAggregateId(event.id());
-            outbox.setEventType("shipment.created");
-            outbox.setCorrelationId(eventEnvelope.correlationId());
-            EventEnvelope<ShipmentCreatedEvent> envelope =
-                    new EventEnvelope<>(
-                            shippingEventId,
-                            eventEnvelope.correlationId(),
-                            outbox.getEventType(),
-                            outbox.getAggregateId(),
-                            outbox.getAggregateType(),
-                            LocalDateTime.now(),
-                            shipmentCreatedEvent
-                    );
-
-            try {
-                outbox.setPayload(objectMapper.writeValueAsString(envelope));
-            } catch (Exception e) {
-                log.error("Error while setting the payload in payment create.", e);
-                throw new RuntimeException(e);
-            }
-            outbox.setStatus(OutboxEvent.Status.NEW);
-            outbox.setCreatedAt(LocalDateTime.now());
-            outboxRepository.save(outbox);
-            log.info("Event publish for shipment.created.");
+            if (shipmentCreated(event)) return;
+            createOutboxEvent(event, eventEnvelope);
             try {
                 processedEventRepository.save(
                         new ProcessedEvent(eventId, LocalDateTime.now())
@@ -114,6 +80,55 @@ public class ShippingService {
         } finally {
             MDC.clear();
         }
+    }
+
+    private boolean shipmentCreated(PaymentSuccessEvent event) {
+        Shipment shipment = repo.findByOrderId(event.id())
+                .orElseGet(() -> {
+                    Shipment s = new Shipment();
+                    s.setOrderId(event.id());
+                    return s;
+                });
+        if (shipment.getStatus() == ShipmentStatus.CREATED) {
+            log.info("Shippment already processed for order {}", shipment.getId());
+            return true;
+        }
+        shipment.setTrackingNumber("TRACKING-12345");
+        shipment.setStatus(ShipmentStatus.CREATED);
+        repo.save(shipment);
+        return false;
+    }
+
+    private void createOutboxEvent(PaymentSuccessEvent event, EventEnvelope<PaymentSuccessEvent> eventEnvelope) {
+        ShipmentCreatedEvent shipmentCreatedEvent = new ShipmentCreatedEvent(event.id());
+        UUID shippingEventId = UUID.randomUUID();
+        OutboxEvent outbox = new OutboxEvent();
+        outbox.setId(shippingEventId);
+        outbox.setAggregateType("Order");
+        outbox.setAggregateId(event.id());
+        outbox.setEventType("shipment.created");
+        outbox.setCorrelationId(eventEnvelope.correlationId());
+        EventEnvelope<ShipmentCreatedEvent> envelope =
+                new EventEnvelope<>(
+                        shippingEventId,
+                        eventEnvelope.correlationId(),
+                        outbox.getEventType(),
+                        outbox.getAggregateId(),
+                        outbox.getAggregateType(),
+                        LocalDateTime.now(),
+                        shipmentCreatedEvent
+                );
+
+        try {
+            outbox.setPayload(objectMapper.writeValueAsString(envelope));
+        } catch (Exception e) {
+            log.error("Error while setting the payload in payment create.", e);
+            throw new RuntimeException(e);
+        }
+        outbox.setStatus(OutboxEvent.Status.NEW);
+        outbox.setCreatedAt(LocalDateTime.now());
+        outboxRepository.save(outbox);
+        log.info("Event publish for shipment.created.");
     }
 
     public ShipmentResponse create(ShipmentRequest shipmentRequest) {
